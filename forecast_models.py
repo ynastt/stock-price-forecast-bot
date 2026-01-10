@@ -6,7 +6,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.stattools import adfuller
+from scipy.signal import argrelextrema
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -337,13 +337,33 @@ class StockForecaster:
     
     def get_investment_recommendations(self, forecast, investment_amount):
         """Генерация инвестиционных рекомендаций"""
-        # Находим локальные минимумы и максимумы
-        from scipy.signal import argrelextrema
+        if len(forecast) < 5:
+            return {
+                'potential_profit': 0,
+                'roi': 0,
+                'trades': [],
+                'summary': "Недостаточно данных для анализа прогноза",
+                'price_change_percent': 0
+            }
         
+        # Находим локальные минимумы и максимумы
         # Локальные минимумы (покупка)
-        min_indices = argrelextrema(forecast, np.less, order=2)[0]
         # Локальные максимумы (продажа)
-        max_indices = argrelextrema(forecast, np.greater, order=2)[0]
+        try:
+            # Пробуем разные параметры для поиска экстремумов
+            # order=1 для более чувствительного поиска
+            min_indices = argrelextrema(forecast, np.less, order=1)[0]
+            max_indices = argrelextrema(forecast, np.greater, order=1)[0]
+        except:
+            # Если не удалось найти экстремумы
+            min_indices = []
+            max_indices = []
+
+        print(len(min_indices), len(max_indices))
+
+        # Если нет экстремумов, используем простую стратегию
+        if len(min_indices) == 0 or len(max_indices) == 0:
+            return self.simple_investment_strategy(forecast, investment_amount)
         
         # Симуляция торговли
         cash = investment_amount
@@ -351,42 +371,92 @@ class StockForecaster:
         trades = []
         
         # стратегия: покупаем на минимумах, продаем на максимумах
-        all_indices = sorted(set(min_indices) | set(max_indices))
+        # Собираем все точки сделок
+        trade_points = []
+        for idx in min_indices:
+            if 0 <= idx < len(forecast):
+                trade_points.append(('BUY', idx, forecast[idx]))
+        for idx in max_indices:
+            if 0 <= idx < len(forecast):
+                trade_points.append(('SELL', idx, forecast[idx]))
         
-        for idx in all_indices:
-            price = forecast[idx]
+        # Сортируем по времени
+        trade_points.sort(key=lambda x: x[1])
+
+        for action, idx, price in trade_points:
             date = pd.date_range(
                 start=self.prices.index[-1] + timedelta(days=1),
                 periods=len(forecast),
                 freq='D'
             )[idx]
+        
+            if action == 'BUY' and cash > 0 and idx < len(forecast) - 1:
+                # Покупаем часть доступных средств
+                buy_amount = cash * 0.8
+                shares_bought = buy_amount / price
+                shares += shares_bought
+                cash -= buy_amount
             
-            if idx in min_indices and cash > 0:
-                # Покупаем
-                shares_to_buy = cash / price
-                shares += shares_to_buy
                 trades.append({
                     'date': date,
                     'action': 'Покупка',
                     'price': price,
-                    'shares': shares_to_buy,
-                    'cash_before': cash,
-                    'cash_after': 0
+                    'shares': shares_bought,
+                    'amount': buy_amount,
+                    'cash_after': cash
                 })
-                cash = 0
-                
-            elif idx in max_indices and shares > 0:
-                # Продаем
-                cash = shares * price
+            
+            elif action == 'SELL' and shares > 0 and idx > 0:
+                # Продаем часть акций
+                shares_to_sell = shares * 0.8
+                sell_amount = shares_to_sell * price
+                cash += sell_amount
+                shares -= shares_to_sell
+            
                 trades.append({
                     'date': date,
                     'action': 'Продажа',
                     'price': price,
-                    'shares': shares,
-                    'cash_before': 0,
+                    'shares': shares_to_sell,
+                    'amount': sell_amount,
                     'cash_after': cash
                 })
-                shares = 0
+        # all_indices = sorted(set(min_indices) | set(max_indices))
+        
+        # for idx in all_indices:
+        #     price = forecast[idx]
+        #     date = pd.date_range(
+        #         start=self.prices.index[-1] + timedelta(days=1),
+        #         periods=len(forecast),
+        #         freq='D'
+        #     )[idx]
+            
+        #     if idx in min_indices and cash > 0:
+        #         # Покупаем
+        #         shares_to_buy = cash / price
+        #         shares += shares_to_buy
+        #         trades.append({
+        #             'date': date,
+        #             'action': 'Покупка',
+        #             'price': price,
+        #             'shares': shares_to_buy,
+        #             'cash_before': cash,
+        #             'cash_after': 0
+        #         })
+        #         cash = 0
+                
+        #     elif idx in max_indices and shares > 0:
+        #         # Продаем
+        #         cash = shares * price
+        #         trades.append({
+        #             'date': date,
+        #             'action': 'Продажа',
+        #             'price': price,
+        #             'shares': shares,
+        #             'cash_before': 0,
+        #             'cash_after': cash
+        #         })
+        #         shares = 0
         
         # Финализируем позицию (продаем в конце если есть акции)
         if shares > 0:
@@ -411,21 +481,68 @@ class StockForecaster:
         roi = (profit / investment_amount) * 100
         
         # Формирование сводки
-        summary = []
-        for trade in trades[-5:]:  # Последние 5 сделок
-            summary.append(
-                f"{trade['date'].strftime('%d.%m')}: {trade['action']} по ${trade['price']:.2f}"
-            )
-        print("summary:")
-        print(summary)
+        if trades:
+            summary = []
+            for trade in trades:
+                summary.append(
+                    f"{trade['date'].strftime('%d.%m')}: {trade['action']} по ${trade['price']:.2f}"
+                )
+            print("summary:")
+            print(summary)
+        else:
+            summary = ["📊 Нет торговых сигналов в прогнозе"]
+        
         # Изменение цены
         price_change = forecast[-1] - forecast[0]
-        price_change_percent = (price_change / forecast[0]) * 100
+        price_change_percent = (price_change / forecast[0]) * 100 if forecast[0] != 0 else 0
         
         return {
             'potential_profit': max(profit, 0),
             'roi': roi,
             'trades': trades,
             'summary': "\n".join(summary),
-            'price_change_percent': price_change_percent
+            'price_change_percent': price_change_percent,
+            'final_value': final_value
+        }
+    
+    def simple_investment_strategy(self, forecast, investment_amount):
+        """Простая стратегия для случаев без экстремумов"""
+        if len(forecast) < 2:
+            return {
+                'potential_profit': 0,
+                'roi': 0,
+                'trades': [],
+                'summary': "Недостаточно данных для анализа",
+                'price_change_percent': 0,
+                'final_value': investment_amount
+            }   
+    
+        # Простая стратегия: покупаем в начале, продаем в конце
+        buy_price = forecast[0]
+        sell_price = forecast[-1]
+    
+        shares = investment_amount / buy_price
+        final_value = shares * sell_price
+        profit = final_value - investment_amount
+        roi = (profit / investment_amount) * 100
+    
+        price_change = sell_price - buy_price
+        price_change_percent = (price_change / buy_price) * 100 if buy_price != 0 else 0
+    
+        summary = f"""
+📊 *Простая стратегия:*
+
+• Покупка (день 1): ${buy_price:.2f}
+• Продажа (день {len(forecast)}): ${sell_price:.2f}
+• Изменение цены: {price_change_percent:+.2f}%
+• Прибыль: ${profit:+,.2f} ({roi:+.2f}%)
+"""
+    
+        return {
+            'potential_profit': max(profit, 0),
+            'roi': roi,
+            'trades': [],
+            'summary': summary,
+            'price_change_percent': price_change_percent,
+            'final_value': final_value
         }

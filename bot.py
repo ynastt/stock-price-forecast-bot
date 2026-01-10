@@ -27,9 +27,6 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Словарь для хранения состояния пользователей
-user_data = {}
-
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     welcome_msg ="""
@@ -246,7 +243,13 @@ async def perform_analysis(message: types.Message, ticker: str, money: float, us
         # Анализ для инвестиций
         await message.answer("💡 Анализирую торговые возможности...")
         recommendations = forecaster.get_investment_recommendations(forecast, money)
-     
+
+        recommendations_comments = ""
+        if recommendations["potential_profit"] == 0 and recommendations["price_change_percent"] < 0:
+            recommendations_comments = "⚠️ Не рекомендуется покупать. Отложите покупку до улучшения ситуации"
+        else:
+            recommendations_comments = recommendations["summary"]
+
         # Формирование отчета
         report = f"""
 *📊 ОТЧЕТ ПО АНАЛИЗУ АКЦИЙ {ticker}*
@@ -260,10 +263,10 @@ async def perform_analysis(message: types.Message, ticker: str, money: float, us
 - Сумма инвестиций: *${money:,.2f}*
 - Потенциальная прибыль: *${recommendations["potential_profit"]:,.2f}*
 - ROI (Return on Investment): *{recommendations["roi"]:+.2f}%*
-- Итоговая стоимость: *${recommendations.get("final_value", money):,.2f}*
+- Итоговая стоимость: *${(recommendations["potential_profit"]+ money):,.2f}*
 
 *📅 Рекомендуемые действия:*
-{recommendations["summary"] if len(recommendations["summary"]) == 0 else "—"}
+{recommendations_comments}
 
 *📊 Статистика прогноза:*
 - Минимальная цена: ${forecast.min():.2f}
